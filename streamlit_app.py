@@ -1,56 +1,103 @@
+import requests
+import json
 import streamlit as st
-from openai import OpenAI
+from langchain.agents import initialize_agent, Tool
+from langchain.chat_models import ChatOpenAI
+from langchain.memory import ConversationBufferMemory
+import os
 
-# Show title and description.
-st.title("💬 Chatbot")
-st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
+
+SERP_API_KEY = os.environ.get("SERP_API_KEY")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+
+
+def get_weather_serp(query: str) -> str:
+    """
+    Call the Scale SERP API using the provided query and try to extract detailed
+    temperature forecast information if available.
+    """
+    params = {
+        'api_key': SERP_API_KEY, 
+        'q': query,  # The query should include any location and day details.
+        'gl': 'us',
+        'hl': 'en',
+        'google_domain': 'google.com',
+        'include_ai_overview': 'true'
+    }
+    response = requests.get('https://api.scaleserp.com/search', params=params)
+    if response.status_code == 200:
+        result_json = response.json()
+        # Attempt to extract detailed forecast information.
+        if "organic_results" in result_json and result_json["organic_results"]:
+            first_result = result_json["organic_results"][0]
+            # If the rich snippet exists and contains extensions, use those as detailed info.
+            if "rich_snippet" in first_result and "top" in first_result["rich_snippet"]:
+                top_info = first_result["rich_snippet"]["top"]
+                if "extensions" in top_info and isinstance(top_info["extensions"], list):
+                    detailed_forecast = " ".join(top_info["extensions"])
+                    # Check if we have temperature info (e.g., containing "°F")
+                    if "°F" in detailed_forecast:
+                        return detailed_forecast
+            # Fallback: try to extract from the snippet field.
+            if "snippet" in first_result:
+                snippet = first_result["snippet"]
+                if "°F" in snippet:
+                    return snippet
+        # If extraction fails, return the full JSON as a fallback.
+        return json.dumps(result_json, indent=2)
+    else:
+        return f"Error: Unable to fetch data from SERP API, status code: {response.status_code}"
+
+# Wrap the API function as a LangChain Tool.
+serp_weather_tool = Tool(
+    name="SERPWeatherAPI",
+    func=get_weather_serp,
+    description=(
+        "Retrieves live weather information using the Scale SERP API based on a user-provided query. "
+        "Use this tool when the user asks about weather forecasts, and include detailed temperature data if available."
+    )
 )
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
+# Initialize the language model.
+llm = ChatOpenAI(temperature=0.7, model_name="gpt-3.5-turbo")
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+# Initialize conversation memory.
+memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
 
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
-
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
+# Create an agent with a more general but guiding prompt.
+agent = initialize_agent(
+    tools=[serp_weather_tool],
+    llm=llm,
+    agent="zero-shot-react-description",
+    memory=memory,
+    verbose=True,
+    handle_parsing_errors=True,
+    agent_kwargs={
+        "prefix": (
+            "You are a helpful weather assistant. When a user asks about the weather, "
+            "use the SERPWeatherAPI tool to obtain live weather forecast data. "
+            "If the query asks for forecasts over multiple days, make sure to include detailed temperature information "
+            "for each day in your final answer. Return your final answer as:\n\n"
+            "Final Answer: <your concise and detailed forecast>\n\n"
+            "Do not add extra commentary."
         )
+    }
+)
 
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+# Build the Streamlit web UI.
+def main():
+    st.title("Live Weather Chatbot")
+    st.write(
+        "Ask about the weather anywhere. For example:\n"
+        "- What does the weather look like in Pittsburgh today?\n"
+        "- How will the weather look in Pittsburgh over the next four days?"
+    )
+    
+    user_query = st.text_input("Enter your weather query:")
+    if st.button("Get Weather") and user_query:
+        with st.spinner("Fetching live weather information..."):
+            response = agent.run(user_query)
+        st.write(response)
+
+if __name__ == "__main__":
+    main()

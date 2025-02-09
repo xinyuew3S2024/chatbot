@@ -1,2 +1,5 @@
 streamlit
 openai
+langchain
+langchain-openai
+requests
