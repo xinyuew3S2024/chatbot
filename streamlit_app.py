@@ -59,7 +59,7 @@ serp_weather_tool = Tool(
 )
 
 # Initialize the language model.
-llm = ChatOpenAI(temperature=0.7, model_name="gpt-3.5-turbo")
+llm = ChatOpenAI(temperature=0.7, model_name="gpt-3.5-turbo", openai_api_key=OPENAI_API_KEY)
 
 # Initialize conversation memory.
 memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
